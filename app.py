@@ -18,8 +18,8 @@ import plotly.graph_objects as go
 #  페이지 설정 (반드시 첫 번째)
 # ══════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="RSI 신호 트래커",
-    page_icon="📊",
+    page_title="미국주식 트래커",
+    page_icon="logo.png",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
