@@ -209,28 +209,63 @@ def detect_signal(rsi: pd.Series):
     return "normal", "-", None
 
 
+def _extract_close(raw: pd.DataFrame, ticker: str) -> pd.Series:
+    """
+    yfinance 버전에 관계없이 종가 Series를 안전하게 추출.
+    최신 yfinance(0.2.x)는 단일 티커도 MultiIndex로 반환함.
+    """
+    if raw is None or raw.empty:
+        return pd.Series(dtype=float)
+
+    # MultiIndex: columns = [("Close","TICKER"), ("Open","TICKER"), ...]
+    if isinstance(raw.columns, pd.MultiIndex):
+        if "Close" in raw.columns.get_level_values(0):
+            close = raw["Close"]
+            # Close 레벨 아래 컬럼이 하나면 바로 Series로
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+            return close.dropna()
+        return pd.Series(dtype=float)
+
+    # 일반 Index
+    if "Close" in raw.columns:
+        return raw["Close"].dropna()
+
+    return pd.Series(dtype=float)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_all_data():
     """전체 종목 데이터 수집 (1시간 캐시)"""
     results = []
+    errors  = []
+
     for name, base, long_etf, inv_etf, cat in PAIRS:
         r = dict(
             name=name, base=base, long=long_etf, inv=inv_etf, cat=cat,
             rsi=None, rsi_ma=None, delta=None,
-            weekly=[], signal="-", tag="normal", action="-", ok=False
+            weekly=[], signal="-", tag="normal", action="-",
+            ok=False, err_msg=""
         )
         try:
-            raw = yf.download(base, period=DATA_PERIOD, interval="1d",
-                              auto_adjust=True, progress=False, silent=True)
-            if raw.empty:
-                results.append(r); continue
+            # ★ silent=True 제거 — yfinance에 없는 파라미터
+            raw = yf.download(
+                base, period=DATA_PERIOD, interval="1d",
+                auto_adjust=True, progress=False
+            )
+            close = _extract_close(raw, base)
 
-            close = raw["Close"]
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:, 0]
-            close = close.dropna()
+            if close.empty:
+                r["err_msg"] = "데이터 없음"
+                errors.append(f"{base}: 데이터 없음")
+                results.append(r)
+                continue
+
             if len(close) < RSI_PERIOD + RSI_MA_PERIOD + 5:
-                results.append(r); continue
+                r["err_msg"] = "데이터 부족"
+                errors.append(f"{base}: 데이터 부족 ({len(close)}일)")
+                results.append(r)
+                continue
 
             rsi = calc_rsi(close)
             ma  = rsi.rolling(RSI_MA_PERIOD).mean()
@@ -252,11 +287,15 @@ def fetch_all_data():
 
             r.update(rsi=cur_rsi, rsi_ma=cur_ma, delta=delta,
                      weekly=weekly, signal=signal, tag=tag, action=action, ok=True)
-        except Exception:
-            pass
+
+        except Exception as e:
+            r["err_msg"] = str(e)[:60]
+            errors.append(f"{base}: {str(e)[:60]}")
+
         results.append(r)
 
-    return results
+    # 오류 목록을 결과에 첨부 (디버깅용)
+    return results, errors
 
 # ══════════════════════════════════════════════════════════════
 #  RSI 스파크라인 (Plotly)
@@ -375,11 +414,24 @@ def main():
             st.rerun()
 
     with st.spinner("📡 50개 종목 데이터 수집 중... (첫 로딩은 약 30~60초)"):
-        results = fetch_all_data()
+        results, errors = fetch_all_data()
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ok_count  = sum(1 for r in results if r["ok"])
+    err_count = len(results) - ok_count
+
     with col_time:
-        st.caption(f"마지막 업데이트: {now}  (1시간 캐시)")
+        st.caption(
+            f"마지막 업데이트: {now}  (1시간 캐시)  ·  "
+            f"성공 {ok_count}건 / 실패 {err_count}건"
+        )
+
+    # 실패 종목이 있으면 expander로 보여줌
+    if errors:
+        with st.expander(f"⚠️ 데이터 로드 실패 {err_count}건 (클릭하여 확인)", expanded=False):
+            for e in errors:
+                st.caption(f"• {e}")
+            st.caption("→ 해당 티커가 Yahoo Finance에서 지원되지 않거나 일시적 오류일 수 있습니다.")
 
     # 카테고리 필터 적용
     if sel_cats:
